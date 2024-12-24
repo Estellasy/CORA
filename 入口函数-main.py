@@ -195,7 +195,8 @@ def main(args):
     torch.manual_seed(seed)
     np.random.seed(seed)
     random.seed(seed)
-
+    
+    # 模型初始化（了解模型输入输出的详细信息）
     model, criterion, post_processors = build_model(args)
     model.to(device)
 
@@ -232,33 +233,35 @@ def main(args):
                 break
         return out
 
+    # 参数分组 使用不同的学习率
     param_dicts = [
         {
-            "params":
+            "params":   # 其他参数 使用基础学习率
                 [p for n, p in model_without_ddp.named_parameters()
                  if "backbone.0" not in n and not match_keywords(n, args.lr_linear_proj_names) and p.requires_grad],
             "lr": args.lr,
         },
         {
             "params": [p for n, p in model_without_ddp.named_parameters()
-                       if "backbone.0" in n and p.requires_grad],
+                       if "backbone.0" in n and p.requires_grad],   # 主干网络 使用较小的学习率
             "lr": args.lr_backbone,
         },
         {
             "params": [p for n, p in model_without_ddp.named_parameters()
-                       if match_keywords(n, args.lr_linear_proj_names) and p.requires_grad],
+                       if match_keywords(n, args.lr_linear_proj_names) and p.requires_grad],    # 线性投影层 通过lr_linear_proj_mult进行缩放
             "lr": args.lr * args.lr_linear_proj_mult,
         }
     ]
 
-    optimizer = torch.optim.AdamW(param_dicts, lr=args.lr, weight_decay=args.weight_decay)
+    optimizer = torch.optim.AdamW(param_dicts, lr=args.lr, weight_decay=args.weight_decay)  # 优化器
     lr_scheduler = torch.optim.lr_scheduler.StepLR(optimizer, args.lr_drop)
     
-    dataset_val = build_dataset(image_set='val', args=args)
+    # 数据加载部分
+    dataset_val = build_dataset(image_set='val', args=args) # 验证集
     if args.debug:
         dataset_train = dataset_val
     else:
-        dataset_train = build_dataset(image_set='train', args=args)
+        dataset_train = build_dataset(image_set='train', args=args) # 训练集
 
     if args.distributed:
         # TODO: update case where not using distributed mode
@@ -273,6 +276,7 @@ def main(args):
 
     batch_sampler_train = torch.utils.data.BatchSampler(sampler_train, args.batch_size, drop_last=True)
 
+    # 利用collate_fn处理变长序列
     data_loader_train = DataLoader(dataset_train,
                                    batch_sampler=batch_sampler_train,
                                    collate_fn=utils.collate_fn,
@@ -292,6 +296,7 @@ def main(args):
     else:
         base_ds = get_coco_api_from_dataset(dataset_val)
 
+    # 如果指定了frozen_weights，加载预训练的DETR权重
     if args.frozen_weights is not None:
         checkpoint = torch.load(args.frozen_weights, map_location='cpu')
         model_without_ddp.detr.load_state_dict(checkpoint['model'])
@@ -302,8 +307,10 @@ def main(args):
         if os.path.exists(checkpoint_dir):
             args.resume = checkpoint_dir
 
+    # 记录最佳性能
     best_performance = -1
 
+    # 如果指定了resume，加载checkpoint
     if args.resume:
         print(f"loading checkpoint from {args.resume}")
         if args.resume.startswith('https'):
@@ -315,6 +322,7 @@ def main(args):
             optimizer.load_state_dict(checkpoint['optimizer'])
             lr_scheduler.load_state_dict(checkpoint['lr_scheduler'])
             args.start_epoch = checkpoint['epoch'] + 1
+        # 加载历史最佳性能
         if 'best_performance' in checkpoint:
             best_performance = checkpoint['best_performance']
         if 'model_ema'in checkpoint and model_ema is not None:
@@ -346,10 +354,12 @@ def main(args):
     print("Start training...")
     start_time = time.time()
     
+    # 主要训练逻辑
     for epoch in range(args.start_epoch, args.epochs):
         if args.distributed:
             sampler_train.set_epoch(epoch)
             
+        # 训练一个epoch的函数（重点关注训练逻辑）
         train_stats = train_one_epoch(
             model, criterion, data_loader_train, optimizer, device, epoch, args.clip_max_norm, args=args, model_ema=model_ema
         )
@@ -370,6 +380,7 @@ def main(args):
                     'model_ema': get_state_dict(model_ema) if model_ema else -1,
                 }, checkpoint_path)
 
+        # 评估模式 每eval_every_epoch次进行一次评估
         if (epoch + 1) % args.eval_every_epoch == 0:
             if args.dataset_file == "lvis":
                 test_stats, coco_evaluator = lvis_evaluate(
@@ -399,6 +410,7 @@ def main(args):
                                 'best_performance': best_performance,
                                 'model_ema': get_state_dict(model_ema) if model_ema else -1,
                             }, best_path)
+            # coco数据集的评估
             else:
                 test_stats, coco_evaluator = evaluate(
                     model if model_ema is None else model_ema.ema, criterion, post_processors, data_loader_val, base_ds, device, args.output_dir, args=args

@@ -57,9 +57,9 @@ class FastDETR(nn.Module):
         self.hidden_dim = args.hidden_dim
         assert self.hidden_dim == transformer.d_model
 
-        self.backbone = backbone
-        self.transformer = transformer
-        self.classifier = classifier
+        self.backbone = backbone    # 主干网络
+        self.transformer = transformer    # 处理特征序列 Transformer
+        self.classifier = classifier    # 分类器 通常是CLIP的文本编码器
 
         # Instead of modeling query_embed as learnable parameters in the shape of (num_queries, d_model),
         # we directly model reference boxes in the shape of (num_queries, 4), in the format of (xc yc w h).
@@ -68,6 +68,7 @@ class FastDETR(nn.Module):
         else:
             self.query_embed = None
 
+        # 输入投影层 实现特征维度的转换
         # ====================================================================================
         #                                   * Clarification *
         #  -----------------------------------------------------------------------------------
@@ -77,16 +78,19 @@ class FastDETR(nn.Module):
         #  We recommend you to simply delete nn.GroupNorm() in self.input_proj for your own
         #  experiments, but if you wish to reproduce our results, please follow our setups below.
         # ====================================================================================
-        if self.multiscale:
+        if self.multiscale: # 多尺度特征处理
             input_proj_list = []
-            for _ in range(self.num_feature_levels):
-                in_channels = backbone.num_channels[_]
-                input_proj_list.append(nn.Sequential(
+            for _ in range(self.num_feature_levels):    # 便利每个特征级别
+                in_channels = backbone.num_channels[_]  # 获取每个特征级别的通道数
+                input_proj_list.append(nn.Sequential(   # 添加卷积层和归一化层
                     nn.Conv2d(in_channels, self.hidden_dim, kernel_size=1),
                     nn.GroupNorm(32, self.hidden_dim),
                 ))
             self.input_proj = nn.ModuleList(input_proj_list)
-        else:
+        else:   # 单尺度特征处理
+            # 当训练轮次较多时(>=25)，使用更简单的特征投影（无GroupNorm）
+            # 明确设置kernel_size=1和padding=0是为了保证特征映射的空间尺寸不变
+            # 长期训练时简单的结构更加稳定
             if self.args.epochs >= 25:
                 kernel_size = 1
                 padding = 0
@@ -104,17 +108,19 @@ class FastDETR(nn.Module):
                     )])
 
         # self.class_embed = nn.Linear(self.hidden_dim, num_classes)
-        self.bbox_embed = MLP(self.hidden_dim, self.hidden_dim, 4, 3)
+
+        # 预测头设计
+        self.bbox_embed = MLP(self.hidden_dim, self.hidden_dim, 4, 3)   # 预测(cx,cy,w,h)
 
         # init prior_prob setting for focal loss
         prior_prob = 0.01
         bias_value = -math.log((1 - prior_prob) / prior_prob)
-        if self.args.end2end:
-            self.image_proj = nn.Linear(self.hidden_dim, self.classifier.text_projection.data.size(1))
-            self.class_bias = nn.Parameter(torch.ones([]) * bias_value)
-            self.tau = nn.Parameter(torch.ones([]) * np.log(1 / 0.07))
+        if self.args.end2end:   # 端到端模式下的预测头
+            self.image_proj = nn.Linear(self.hidden_dim, self.classifier.text_projection.data.size(1))  # 将图像特征投影到与文本特征相同的空间
+            self.class_bias = nn.Parameter(torch.ones([]) * bias_value) # 分类偏置项，用于调整focal loss
+            self.tau = nn.Parameter(torch.ones([]) * np.log(1 / 0.07)) # 温度参数，用于调整相似度计算的尺度
         else:
-            self.objectness_embed = nn.Linear(self.hidden_dim, 1)
+            self.objectness_embed = nn.Linear(self.hidden_dim, 1)   # 非端到端模式下只预测目标性（是否有物体）
             if not self.args.disable_init:
                 nn.init.constant_(self.objectness_embed.bias, bias_value)
 
